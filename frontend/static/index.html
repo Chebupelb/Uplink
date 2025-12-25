@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>UPLINK // INTERFACE</title>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/wasm_exec.js"></script>
+    <style>
+        :root {
+            --hud: #00f3ff;
+            --hud-dim: rgba(0, 243, 255, 0.15);
+            --bg: #0b1016;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--hud);
+            font-family: 'Rajdhani', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            text-transform: uppercase;
+        }
+
+        /* Анимированная сетка на фоне */
+        .grid-bg {
+            position: fixed;
+            /* Увеличиваем область, чтобы при наклоне не было пустых краев */
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background-image: 
+                linear-gradient(var(--hud-dim) 1px, transparent 1px), 
+                linear-gradient(90deg, var(--hud-dim) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: -1;
+            
+            /* Эффект перспективы и наклона */
+            transform: perspective(1000px) rotateX(60deg);
+            /* Анимация движения */
+            animation: grid-move 15s linear infinite;
+        }
+
+        @keyframes grid-move {
+            from {
+                transform: perspective(1000px) rotateX(60deg) translateY(0);
+            }
+            to {
+                /* Сдвигаем на размер одной ячейки (50px) для бесшовности */
+                transform: perspective(1000px) rotateX(60deg) translateY(50px);
+            }
+        }
+
+        .glow-text { 
+            text-shadow: 0 0 10px var(--hud); 
+        }
+
+        .hud-border { 
+            border: 1px solid var(--hud-dim); 
+            box-shadow: 0 0 15px rgba(0, 243, 255, 0.05); 
+        }
+
+        input {
+            background: rgba(0, 243, 255, 0.05) !important;
+            border: 1px solid var(--hud-dim) !important;
+            color: var(--hud) !important;
+        }
+
+        input:focus { 
+            border-color: var(--hud) !important; 
+            outline: none; 
+            box-shadow: 0 0 10px var(--hud-dim); 
+        }
+    </style>
+</head>
+<body>
+    <div class="grid-bg"></div>
+
+    <div id="app"></div>
+
+    <script>
+        const go = new Go();
+        // Загрузка и запуск WebAssembly
+        WebAssembly.instantiateStreaming(fetch("/main.wasm"), go.importObject).then((res) => {
+            go.run(res.instance);
+        }).catch((err) => {
+            console.error("Ошибка загрузки WASM:", err);
+        });
+    </script>
+</body>
+</html>
