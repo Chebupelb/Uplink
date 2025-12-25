@@ -25,7 +25,7 @@ const (
 	MatchmakingBaseRange = 100.0
 	MatchmakingTimeMult  = 50.0
 	WPMCharCount         = 5.0
-	EloKFactor           = 32.0
+	EloKFactor           = 25.0
 
 	InputBufferSize = 30
 	MinInputSamples = 20
