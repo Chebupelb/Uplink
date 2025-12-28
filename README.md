@@ -50,7 +50,7 @@ docker-compose up --build
 
 ### 3. Настройка базы данных (pgAdmin)
 
-1. Перейдите по адресу: **`http://localhost:5050`**
+1. Перейдите по адресу: [http://localhost:5050](http://localhost:5050)
 2. Авторизуйтесь с учетными данными:
    * **Email:** `admin@uplink.com`
    * **Password:** `admin`
