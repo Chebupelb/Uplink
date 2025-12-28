@@ -9,16 +9,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type DB struct{ pool *pgxpool.Pool }
+type DB struct {
+	pool *pgxpool.Pool
+}
 
 type User struct {
-	ID, Username, Password string
-	Rating                 int
+	ID           string  `json:"id"`
+	Username     string  `json:"username"`
+	PasswordHash string  `json:"-"`
+	Rating       int     `json:"rating"`
+	AvgWpm       float64 `json:"avg_wpm"`
 }
 
 type Text struct {
-	ID, Length int
-	Content    string
+	ID      int    `db:"id"`
+	Length  int    `db:"length"`
+	Content string `db:"content"`
 }
 
 type MatchResult struct {
@@ -45,8 +51,27 @@ func (d *DB) CreateUser(ctx context.Context, name, hash string) (string, error) 
 	return id, err
 }
 
+func (d *DB) GetLeaderboard(ctx context.Context, limit int) ([]map[string]any, error) {
+	rows, err := d.pool.Query(ctx, "SELECT username, rating, avg_wpm FROM users ORDER BY rating DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToMap)
+}
+
 func (d *DB) GetUser(ctx context.Context, name string) (*User, error) {
-	rows, err := d.pool.Query(ctx, "SELECT id, username, password_hash as password, rating FROM users WHERE username=$1", name)
+	rows, err := d.pool.Query(ctx, "SELECT id, username, password_hash, rating, avg_wpm FROM users WHERE username=$1", name)
+	if err != nil {
+		return nil, err
+	}
+	u, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[User])
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+func (d *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
+	rows, err := d.pool.Query(ctx, "SELECT id, username, password_hash, rating, avg_wpm FROM users WHERE id=$1", id)
 	if err != nil {
 		return nil, err
 	}
@@ -59,6 +84,17 @@ func (d *DB) GetUser(ctx context.Context, name string) (*User, error) {
 
 func (d *DB) UpdateRating(ctx context.Context, uid string, change int) error {
 	_, err := d.pool.Exec(ctx, "UPDATE users SET rating = rating + $1 WHERE id = $2", change, uid)
+	return err
+}
+
+func (d *DB) RefreshUserStats(ctx context.Context, userID string) error {
+	query := `
+        UPDATE users 
+        SET avg_wpm = (SELECT AVG(wpm) FROM match_results WHERE user_id = $1),
+			rating = rating + $2 -- (условно)
+		WHERE id = $1`
+
+	_, err := d.pool.Exec(ctx, query, userID)
 	return err
 }
 
@@ -108,10 +144,10 @@ func (d *DB) SaveMatch(ctx context.Context, textID int, res []MatchResult) error
 func (d *DB) GetHistory(ctx context.Context, uid string, limit int, cursor string) ([]map[string]any, string, error) {
 	args := []any{uid, limit}
 	query := `SELECT m.id, mr.wpm, mr.accuracy, mr.rank, m.ended_at, COALESCE(left(t.content, 50), '[удалено]') as preview 
-		FROM match_results mr 
-		JOIN matches m ON mr.match_id = m.id 
-		LEFT JOIN texts t ON m.text_id = t.id 
-		WHERE mr.user_id = $1`
+        FROM match_results mr 
+        JOIN matches m ON mr.match_id = m.id 
+        LEFT JOIN texts t ON m.text_id = t.id 
+        WHERE mr.user_id = $1`
 
 	if parts := strings.Split(cursor, ","); len(parts) == 2 {
 		query += " AND (m.ended_at, m.id) < ($3, $4)"
@@ -124,10 +160,12 @@ func (d *DB) GetHistory(ctx context.Context, uid string, limit int, cursor strin
 		return nil, "", err
 	}
 	type Row struct {
-		ID, Preview string
-		WPM, Rank   int
-		Accuracy    float64
-		EndedAt     time.Time
+		ID       string    `db:"id"`
+		Preview  string    `db:"preview"`
+		WPM      int       `db:"wpm"`
+		Rank     int       `db:"rank"`
+		Accuracy float64   `db:"accuracy"`
+		EndedAt  time.Time `db:"ended_at"`
 	}
 	data, err := pgx.CollectRows(rows, pgx.RowToStructByName[Row])
 	if err != nil {
@@ -145,10 +183,21 @@ func (d *DB) GetHistory(ctx context.Context, uid string, limit int, cursor strin
 	return res, next, nil
 }
 
-func (d *DB) GetLeaderboard(ctx context.Context, limit int) ([]map[string]any, error) {
-	rows, err := d.pool.Query(ctx, "SELECT username, rating FROM users ORDER BY rating DESC LIMIT $1", limit)
+func (d *DB) GetCategories(ctx context.Context) ([]string, error) {
+	query := "SELECT DISTINCT category FROM texts"
+	rows, err := d.pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToMap)
+	defer rows.Close()
+
+	var categories []string
+	for rows.Next() {
+		var cat string
+		if err := rows.Scan(&cat); err != nil {
+			return nil, err
+		}
+		categories = append(categories, cat)
+	}
+	return categories, nil
 }

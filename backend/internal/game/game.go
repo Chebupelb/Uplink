@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math"
-	"math/big"
 	"net/http"
 	"sort"
 	"strings"
@@ -42,8 +41,11 @@ const (
 )
 
 type Settings struct {
-	Language, TextMode, Category string
-	TextID, MaxPlayers           int
+	Language   string `json:"language"`
+	TextMode   string `json:"text_mode"`
+	Category   string `json:"category"`
+	TextID     int    `json:"text_id"`
+	MaxPlayers int    `json:"max_players"`
 }
 
 type Client struct {
@@ -53,7 +55,7 @@ type Client struct {
 	room         *Room
 	joinTime     time.Time
 	send         chan any
-
+	Accuracy     int
 	mu           sync.Mutex
 	Progress     float64
 	WPM          float64
@@ -72,6 +74,12 @@ type Manager struct {
 	db     *db.DB
 	log    *slog.Logger
 	done   chan struct{}
+}
+
+type LobbyInfo struct {
+	ID      string `json:"id"`
+	Players int    `json:"players"`
+	Status  string `json:"status"`
 }
 
 func New(d *db.DB, l *slog.Logger) *Manager {
@@ -96,10 +104,44 @@ func (m *Manager) CreateRoom(owner, mode string, s Settings) string {
 		clients: make(map[string]*Client), db: m.db, log: m.log,
 		broadcast: make(chan any, 256), unregister: make(chan string),
 		input: make(chan *inputMsg, 64),
+		ChatHistory: make([]map[string]any, 0),
 	}
 	m.rooms.Store(id, r)
 	go r.run(func() { m.rooms.Delete(id) })
 	return id
+}
+
+func (m *Manager) broadcastLobbyPlayers(queueKey string) {
+	m.qMu.Lock()
+	clients, ok := m.queues[queueKey]
+	if !ok {
+		m.qMu.Unlock()
+		return
+	}
+
+	playersList := make([]any, 0, len(clients))
+	for _, c := range clients {
+		playersList = append(playersList, map[string]any{
+			"user_id":  c.ID,
+			"username": c.Username,
+			"rating":   c.Rating,
+		})
+	}
+	m.qMu.Unlock()
+
+	msg := map[string]any{
+		"type":    "player_joined",
+		"payload": playersList,
+	}
+
+	m.qMu.Lock()
+	for _, c := range m.queues[queueKey] {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+	m.qMu.Unlock()
 }
 
 func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request, uid, user string) {
@@ -110,33 +152,46 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request, uid, user str
 	}
 
 	rid := r.URL.Query().Get("room_id")
+
 	if rid == "" {
-		var msg struct {
-			Payload struct{ Mode, Language, TextMode string }
+		u, _ := m.db.GetUserByID(r.Context(), uid)
+		rating := 1000
+		if u != nil {
+			rating = u.Rating
+			if user == "" || user == "Guest" {
+				user = u.Username
+			}
 		}
+		client := &Client{
+			ID:       uid,
+			Username: user,
+			Rating:   rating,
+			conn:     c,
+			joinTime: time.Now(),
+			send:     make(chan any, 64),
+		}
+
+		var msg struct {
+			Type    string `json:"type"`
+			Payload struct{ Mode, Language, TextMode string } `json:"payload"`
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second*5)
 		if err := wsjson.Read(ctx, c, &msg); err != nil {
 			cancel()
-			_ = c.Close(websocket.StatusProtocolError, "ошибка чтения")
+			_ = c.Close(websocket.StatusProtocolError, "ошибка инициализации")
 			return
 		}
 		cancel()
 
-		u, _ := m.db.GetUser(r.Context(), user)
-		rating := 1000
-		if u != nil {
-			rating = u.Rating
-		}
-
-		textMode := msg.Payload.TextMode
-		if textMode != "generate" {
-			textMode = "standard"
-		}
-
 		m.qMu.Lock()
-		k := msg.Payload.Language + "|" + textMode
-		m.queues[k] = append(m.queues[k], &Client{ID: uid, Username: user, Rating: rating, conn: c, joinTime: time.Now(), send: make(chan any, 64)})
+		k := msg.Payload.Language + "|" + msg.Payload.TextMode
+		m.queues[k] = append(m.queues[k], client)
 		m.qMu.Unlock()
+
+		go client.writeLoop()
+		m.broadcastLobbyPlayers(k)
+		go m.lobbyReadLoop(client, k)
 		return
 	}
 
@@ -147,11 +202,93 @@ func (m *Manager) HandleWS(w http.ResponseWriter, r *http.Request, uid, user str
 	}
 	room := val.(*Room)
 
-	cl := &Client{ID: uid, Username: user, conn: c, room: room, joinTime: time.Now(), lastInput: time.Now(), send: make(chan any, 64)}
-	room.join(cl)
+	room.mu.Lock()
+	_, isReconnecting := room.clients[uid]
+	if !isReconnecting && len(room.clients) >= room.Settings.MaxPlayers {
+		room.mu.Unlock()
+		_ = c.Close(websocket.StatusPolicyViolation, "LOBBY_FULL")
+		return
+	}
 
+	if isReconnecting {
+		oldClient, exists := room.clients[uid]
+		if exists {
+			_ = oldClient.conn.Close(websocket.StatusGoingAway, "reconnected")
+			delete(room.clients, uid)
+		}
+	}
+	room.mu.Unlock()
+
+	u, _ := m.db.GetUserByID(r.Context(), uid)
+	if u != nil {
+		user = u.Username
+	}
+
+	if user == "" || user == "Guest" {
+		user = "Agent_" + uid[:4]
+	}
+
+	cl := &Client{
+		ID:        uid,
+		Username:  user,
+		conn:      c,
+		room:      room,
+		joinTime:  time.Now(),
+		lastInput: time.Now(),
+		send:      make(chan any, 64),
+	}
+	room.join(cl)
 	go cl.writeLoop()
 	go cl.readLoop()
+}
+
+func (m *Manager) lobbyReadLoop(c *Client, queueKey string) {
+	defer func() {
+		m.qMu.Lock()
+		q := m.queues[queueKey]
+		for i, cl := range q {
+			if cl == c {
+				m.queues[queueKey] = append(q[:i], q[i+1:]...)
+				break
+			}
+		}
+		m.qMu.Unlock()
+		m.broadcastLobbyPlayers(queueKey)
+		_ = c.conn.Close(websocket.StatusNormalClosure, "")
+	}()
+
+	for {
+		var msg struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := wsjson.Read(context.Background(), c.conn, &msg); err != nil {
+			break
+		}
+		if msg.Type == "chat_message" {
+			var p struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(msg.Payload, &p) == nil {
+				out := map[string]any{
+					"type": "chat_message",
+					"payload": map[string]any{
+						"sender_name": c.Username,
+						"text":         p.Text,
+						"time":         time.Now(),
+					},
+				}
+				m.qMu.Lock()
+				for _, recipient := range m.queues[queueKey] {
+					select {
+					case recipient.send <- out:
+					default:
+					}
+				}
+				m.qMu.Unlock()
+			}
+		}
+	}
 }
 
 func (m *Manager) matchmaker() {
@@ -169,9 +306,6 @@ func (m *Manager) matchmaker() {
 				}
 
 				parts := strings.Split(k, "|")
-				if len(parts) != 2 {
-					continue
-				}
 				lang, textMode := parts[0], parts[1]
 
 				sort.Slice(q, func(i, j int) bool { return q[i].Rating < q[j].Rating })
@@ -206,29 +340,41 @@ func (m *Manager) matchmaker() {
 }
 
 func (m *Manager) startMatch(p1, p2 *Client, lang, textMode string) {
-	cat := "general"
-	if textMode == "standard" {
-		cats := []string{"general", "literature", "code"}
-		if n, err := rand.Int(rand.Reader, big.NewInt(int64(len(cats)))); err == nil {
-			cat = cats[n.Int64()]
-		}
-	}
-
 	rid := m.CreateRoom(p1.ID, "matchmaking", Settings{
-		MaxPlayers: 2,
-		Language:   lang,
-		TextMode:   textMode,
-		Category:   cat,
+		MaxPlayers: 2, Language: lang, TextMode: textMode, Category: "general",
 	})
+
 	msg := map[string]any{"type": "match_found", "payload": map[string]string{"room_id": rid}}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancel()
+	p1.send <- msg
+	p2.send <- msg
+}
 
-	_ = wsjson.Write(ctx, p1.conn, msg)
-	_ = wsjson.Write(ctx, p2.conn, msg)
-	_ = p1.conn.Close(websocket.StatusNormalClosure, "")
-	_ = p2.conn.Close(websocket.StatusNormalClosure, "")
+func (m *Manager) CreateManualLobby(ownerID string) string {
+	id := genID()
+
+	r := &Room{
+		ID:    id,
+		Owner: ownerID,
+		Mode:  "private",
+		State: StateLobby,
+		Settings: Settings{
+			MaxPlayers: 3,
+			Language:   "ru",
+			TextMode:   "standard",
+		},
+		clients:     make(map[string]*Client),
+		db:          m.db,
+		log:         m.log,
+		broadcast:   make(chan any, 256),
+		unregister:  make(chan string),
+		input:       make(chan *inputMsg, 64),
+		ChatHistory: make([]map[string]any, 0),
+	}
+
+	m.rooms.Store(id, r)
+	go r.run(func() { m.rooms.Delete(id) })
+	return id
 }
 
 type Room struct {
@@ -237,15 +383,15 @@ type Room struct {
 	State           int
 	Text            *db.Text
 	StartTime       time.Time
-
-	clients      map[string]*Client
-	participants []*Client
-	mu           sync.RWMutex
-	db           *db.DB
-	log          *slog.Logger
-	broadcast    chan any
-	unregister   chan string
-	input        chan *inputMsg
+	clients         map[string]*Client
+	participants    []*Client
+	mu              sync.RWMutex
+	db              *db.DB
+	log             *slog.Logger
+	broadcast       chan any
+	unregister      chan string
+	input           chan *inputMsg
+	ChatHistory     []map[string]any
 }
 
 type inputMsg struct {
@@ -275,37 +421,14 @@ func (r *Room) run(cleanup func()) {
 			if c, ok := r.clients[uid]; ok {
 				delete(r.clients, uid)
 				close(c.send)
-
-				if r.State == StateGame {
-					c.mu.Lock()
-					c.Disqualified = true
-					c.Finished = true
-					c.mu.Unlock()
-				}
 			}
-
-			allFinished := true
-			if r.State == StateGame {
-				for _, p := range r.participants {
-					p.mu.Lock()
-					if !p.Finished {
-						allFinished = false
-					}
-					p.mu.Unlock()
-				}
-			} else {
-				allFinished = len(r.clients) == 0
-			}
-
+			isEmpty := len(r.clients) == 0
 			r.mu.Unlock()
 
-			if r.State == StateGame && allFinished {
-				r.finish()
-			} else if r.State != StateGame && allFinished {
+			if isEmpty {
+				cleanup()
 				return
-			}
-
-			if r.State != StateFinished {
+			} else {
 				r.sendPlayers()
 			}
 		case in := <-r.input:
@@ -316,7 +439,12 @@ func (r *Room) run(cleanup func()) {
 				list := make([]any, 0, len(r.clients))
 				for _, c := range r.clients {
 					c.mu.Lock()
-					list = append(list, map[string]any{"user_id": c.ID, "progress": c.Progress, "wpm": int(c.WPM)})
+					list = append(list, map[string]any{
+						"user_id":  c.ID,
+						"username": c.Username,
+						"progress": c.Progress,
+						"wpm":      int(c.WPM),
+					})
 					c.mu.Unlock()
 				}
 				r.mu.RUnlock()
@@ -327,11 +455,6 @@ func (r *Room) run(cleanup func()) {
 		case <-idle.C:
 			return
 		}
-		r.mu.RLock()
-		if len(r.clients) > 0 {
-			idle.Reset(RoomIdleTimeout)
-		}
-		r.mu.RUnlock()
 	}
 }
 
@@ -339,25 +462,35 @@ func (r *Room) join(c *Client) {
 	r.mu.Lock()
 	if len(r.clients) >= r.Settings.MaxPlayers {
 		r.mu.Unlock()
-		_ = c.conn.Close(websocket.StatusPolicyViolation, "комната переполнена")
+		_ = c.conn.Close(websocket.StatusPolicyViolation, "Lobby is full")
 		return
 	}
-	r.clients[c.ID] = c
-	r.mu.Unlock()
 
-	select {
-	case c.send <- map[string]any{"type": "update_settings", "payload": r.Settings}:
-	default:
+	r.clients[c.ID] = c
+	if len(r.ChatHistory) > 0 {
+		c.send <- map[string]any{
+			"type":    "chat_history",
+			"payload": r.ChatHistory,
+		}
 	}
+	r.mu.Unlock()
+	c.send <- map[string]any{"type": "update_settings", "payload": r.Settings}
 	r.sendPlayers()
 }
 
 func (r *Room) sendPlayers() {
 	r.mu.RLock()
+	ownerID := r.Owner
 	list := make([]any, 0, len(r.clients))
 	for _, c := range r.clients {
 		c.mu.Lock()
-		list = append(list, map[string]any{"user_id": c.ID, "username": c.Username, "finished": c.Finished, "is_ready": c.Ready})
+		list = append(list, map[string]any{
+			"user_id":  c.ID,
+			"username": c.Username,
+			"finished": c.Finished,
+			"is_ready": c.Ready,
+			"is_owner": c.ID == ownerID,
+		})
 		c.mu.Unlock()
 	}
 	r.mu.RUnlock()
@@ -365,9 +498,6 @@ func (r *Room) sendPlayers() {
 }
 
 func (c *Client) writeLoop() {
-	defer func() {
-		_ = c.conn.Close(websocket.StatusNormalClosure, "")
-	}()
 	for msg := range c.send {
 		ctx, cancel := context.WithTimeout(context.Background(), WriteWait)
 		err := wsjson.Write(ctx, c.conn, msg)
@@ -380,31 +510,70 @@ func (c *Client) writeLoop() {
 
 func (c *Client) readLoop() {
 	defer func() { c.room.unregister <- c.ID }()
-	c.conn.SetReadLimit(32768)
-
 	for {
 		var msg struct {
-			Type    string
-			Payload json.RawMessage
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
 		}
 		if err := wsjson.Read(context.Background(), c.conn, &msg); err != nil {
 			break
 		}
 
 		switch msg.Type {
+		case "update_settings":
+			if c.ID != c.room.Owner {
+				continue
+			}
+			var newSettings struct {
+				MaxPlayers int    `json:"max_players"`
+				Language   string `json:"language"`
+				Category   string `json:"category"`
+			}
+
+			if err := json.Unmarshal(msg.Payload, &newSettings); err == nil {
+				c.room.mu.Lock()
+				currentPlayersCount := len(c.room.clients)
+
+				if newSettings.MaxPlayers >= 1 && newSettings.MaxPlayers <= 8 {
+					if newSettings.MaxPlayers < currentPlayersCount {
+						c.room.Settings.MaxPlayers = currentPlayersCount
+					} else {
+						c.room.Settings.MaxPlayers = newSettings.MaxPlayers
+					}
+				}
+
+				if newSettings.Language != "" {
+					c.room.Settings.Language = newSettings.Language
+				}
+				if newSettings.Category != "" {
+					c.room.Settings.Category = newSettings.Category
+				}
+
+				currentSettings := c.room.Settings
+				c.room.mu.Unlock()
+				c.room.broadcast <- map[string]any{
+					"type":    "update_settings",
+					"payload": currentSettings,
+				}
+				c.room.sendPlayers()
+			}
+
 		case "client_input":
 			var p struct {
 				CurrentIndex int `json:"current_index"`
+				Accuracy     int `json:"accuracy"`
 			}
 			if json.Unmarshal(msg.Payload, &p) == nil {
+				c.mu.Lock()
+				c.Accuracy = p.Accuracy
+				c.mu.Unlock()
 				c.room.input <- &inputMsg{c, p.CurrentIndex}
 			}
 		case "player_ready":
 			c.mu.Lock()
 			c.Ready = !c.Ready
-			ready := c.Ready
 			c.mu.Unlock()
-			if c.room.Mode == "solo" && ready {
+			if c.room.Mode == "solo" && c.Ready {
 				go c.room.startGame()
 			}
 			c.room.sendPlayers()
@@ -415,20 +584,23 @@ func (c *Client) readLoop() {
 				Text string `json:"text"`
 			}
 			if json.Unmarshal(msg.Payload, &p) == nil {
-				c.room.broadcast <- map[string]any{"type": "chat_message", "payload": map[string]any{"sender_id": c.ID, "sender_name": c.Username, "text": p.Text, "time": time.Now()}}
-			}
-		case "update_settings":
-			var s Settings
-			if json.Unmarshal(msg.Payload, &s) == nil && c.ID == c.room.Owner {
-				c.room.mu.RLock()
-				if c.room.State == StateLobby {
-					c.room.mu.RUnlock()
-					c.room.mu.Lock()
-					c.room.Settings = s
-					c.room.mu.Unlock()
-					c.room.broadcast <- map[string]any{"type": "update_settings", "payload": s}
-				} else {
-					c.room.mu.RUnlock()
+				newMsg := map[string]any{
+					"sender_id":   c.ID,
+					"sender_name": c.Username,
+					"text":         p.Text,
+					"time":         time.Now(),
+				}
+
+				c.room.mu.Lock()
+				c.room.ChatHistory = append(c.room.ChatHistory, newMsg)
+				if len(c.room.ChatHistory) > 50 {
+					c.room.ChatHistory = c.room.ChatHistory[1:]
+				}
+				c.room.mu.Unlock()
+
+				c.room.broadcast <- map[string]any{
+					"type":    "chat_message",
+					"payload": newMsg,
 				}
 			}
 		}
@@ -453,7 +625,6 @@ func (r *Room) startGame() {
 	}
 
 	if err != nil {
-		r.log.Error("ошибка получения текста", "err", err)
 		r.mu.Lock()
 		r.State = StateLobby
 		r.mu.Unlock()
@@ -464,26 +635,33 @@ func (r *Room) startGame() {
 	r.Text = t
 	r.State = StateGame
 	r.StartTime = time.Now().Add(StartDelay)
-
 	r.participants = make([]*Client, 0, len(r.clients))
+	playersInfo := make([]map[string]any, 0, len(r.clients))
 	for _, c := range r.clients {
 		c.mu.Lock()
-		c.Progress, c.WPM, c.Finished, c.Disqualified, c.lastIdx, c.lastInput, c.intervals = 0, 0, false, false, 0, r.StartTime, nil
+		c.Progress, c.WPM, c.Accuracy, c.Finished, c.Disqualified, c.lastIdx, c.lastInput, c.intervals = 0, 0, 100, false, false, 0, r.StartTime, nil
 		c.mu.Unlock()
 		r.participants = append(r.participants, c)
+		playersInfo = append(playersInfo, map[string]any{
+			"user_id":  c.ID,
+			"username": c.Username,
+		})
 	}
 	r.mu.Unlock()
 
-	r.broadcast <- map[string]any{"type": "game_start", "payload": map[string]any{"text": t.Content, "start_time": r.StartTime}}
+	r.broadcast <- map[string]any{
+		"type": "game_start",
+		"payload": map[string]any{
+			"text":       t.Content,
+			"start_time": r.StartTime,
+			"players":    playersInfo,
+		},
+	}
 }
 
 func (r *Room) handleInput(c *Client, idx int) {
 	r.mu.RLock()
-	if r.State != StateGame {
-		r.mu.RUnlock()
-		return
-	}
-	if time.Now().Before(r.StartTime) {
+	if r.State != StateGame || time.Now().Before(r.StartTime) {
 		r.mu.RUnlock()
 		return
 	}
@@ -494,36 +672,13 @@ func (r *Room) handleInput(c *Client, idx int) {
 		c.mu.Unlock()
 		return
 	}
-	now := time.Now()
-	diff := now.Sub(c.lastInput).Milliseconds()
-	c.intervals = append(c.intervals, diff)
-	if len(c.intervals) > InputBufferSize {
-		c.intervals = c.intervals[1:]
-	}
 
-	var sum, sqSum float64
-	for _, v := range c.intervals {
-		val := float64(v)
-		sum += val
-		sqSum += val * val
-	}
-	mean := sum / float64(len(c.intervals))
-	variance := (sqSum / float64(len(c.intervals))) - (mean * mean)
-
-	if len(c.intervals) > MinInputSamples && (mean < AntiCheatMinMean || variance < AntiCheatMinVariance) {
-		c.Disqualified = true
-		c.Finished = true
-		c.mu.Unlock()
-		_ = c.conn.Close(websocket.StatusPolicyViolation, "обнаружен чит")
-		return
-	}
-
-	c.lastIdx, c.lastInput, c.Progress = idx, now, float64(idx)
+	c.lastIdx, c.Progress = idx, float64(idx)
 	if m := time.Since(r.StartTime).Minutes(); m > 0 {
 		c.WPM = (float64(idx) / WPMCharCount) / m
 	}
-	finished := idx >= r.Text.Length
-	c.Finished = finished
+	c.Finished = idx >= r.Text.Length
+	finished := c.Finished
 	c.mu.Unlock()
 
 	if finished {
@@ -535,9 +690,6 @@ func (r *Room) handleInput(c *Client, idx int) {
 				all = false
 			}
 			p.mu.Unlock()
-			if !all {
-				break
-			}
 		}
 		r.mu.RUnlock()
 		if all {
@@ -554,56 +706,83 @@ func (r *Room) finish() {
 	}
 	r.State = StateFinished
 
-	res := make([]db.MatchResult, 0, len(r.participants))
+	type resEntry struct {
+		ID       string
+		Name     string
+		WPM      int
+		Accuracy float64
+		Rating   int
+	}
+
+	tempRes := make([]resEntry, 0, len(r.participants))
 	for _, c := range r.participants {
 		c.mu.Lock()
 		wpm := int(c.WPM)
 		if c.Disqualified {
 			wpm = 0
 		}
-		res = append(res, db.MatchResult{UserID: c.ID, WPM: wpm, Accuracy: 100})
+		tempRes = append(tempRes, resEntry{
+			ID:       c.ID,
+			Name:     c.Username,
+			WPM:      wpm,
+			Accuracy: float64(c.Accuracy),
+			Rating:   c.Rating,
+		})
 		c.mu.Unlock()
 	}
 	r.mu.Unlock()
 
-	sort.Slice(res, func(i, j int) bool { return res[i].WPM > res[j].WPM })
+	sort.Slice(tempRes, func(i, j int) bool { return tempRes[i].WPM > tempRes[j].WPM })
 
-	states := make([]any, len(res))
-	for i := range res {
-		res[i].Rank = i + 1
+	finalStates := make([]any, len(tempRes))
+	dbResults := make([]db.MatchResult, len(tempRes))
+
+	for i, entry := range tempRes {
 		change := 0
 
-		if r.Mode == "matchmaking" && len(res) == 2 {
-			p1 := res[0]
-			p2 := res[1]
-
-			u1, _ := r.db.GetUser(context.Background(), p1.UserID)
-			u2, _ := r.db.GetUser(context.Background(), p2.UserID)
-
-			if u1 != nil && u2 != nil {
-				score := 1.0
-				if i == 1 {
-					score = 0.0
-				}
-
-				myRating := u1.Rating
-				oppRating := u2.Rating
-				if i == 1 {
-					myRating, oppRating = u2.Rating, u1.Rating
-				}
-
-				change = calculateElo(myRating, oppRating, score)
-				if err := r.db.UpdateRating(context.Background(), res[i].UserID, change); err != nil {
-					r.log.Error("ошибка обновления рейтинга", "err", err)
-				}
-			}
+		if len(tempRes) >= 2 {
+			score := 0.0
+			if i == 0 { score = 1.0 }
+			
+			otherIdx := 0
+			if i == 0 { otherIdx = 1 }
+			otherRating := tempRes[otherIdx].Rating
+			
+			change = calculateElo(entry.Rating, otherRating, score)
+		} else {
+			change = 5
 		}
-		states[i] = map[string]any{"user_id": res[i].UserID, "wpm": res[i].WPM, "finished": true, "rating_change": change}
+		
+		_ = r.db.UpdateRating(context.Background(), entry.ID, change)
+
+		finalStates[i] = map[string]any{
+			"user_id":       entry.ID,
+			"username":      entry.Name,
+			"wpm":           entry.WPM,
+			"accuracy":      entry.Accuracy,
+			"finished":      true,
+			"rating_change": change,
+		}
+
+		dbResults[i] = db.MatchResult{
+			UserID:   entry.ID,
+			WPM:      entry.WPM,
+			Accuracy: entry.Accuracy,
+			Rank:     i + 1,
+		}
 	}
-	if err := r.db.SaveMatch(context.Background(), r.Text.ID, res); err != nil {
-		r.log.Error("ошибка сохранения матча", "err", err)
+
+	_ = r.db.SaveMatch(context.Background(), r.Text.ID, dbResults)
+
+	for _, entry := range tempRes {
+		go func(uid string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = r.db.RefreshUserStats(ctx, uid)
+		}(entry.ID)
 	}
-	r.broadcast <- map[string]any{"type": "game_end", "payload": map[string]any{"results": states}}
+
+	r.broadcast <- map[string]any{"type": "game_end", "payload": map[string]any{"results": finalStates}}
 }
 
 func calculateElo(ra, rb int, score float64) int {
@@ -613,8 +792,33 @@ func calculateElo(ra, rb int, score float64) int {
 
 func genID() string {
 	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "0000"
-	}
+	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func (m *Manager) GetActiveLobbies() []LobbyInfo {
+	var list []LobbyInfo
+
+	m.rooms.Range(func(key, value any) bool {
+		roomID, okID := key.(string)
+		room, okRoom := value.(*Room)
+
+		if okID && okRoom {
+			room.mu.RLock()
+			count := len(room.clients)
+			state := room.State
+			room.mu.RUnlock()
+
+			if count > 0 && state == StateLobby {
+				list = append(list, LobbyInfo{
+					ID:      roomID,
+					Players: count,
+					Status:  "WAITING",
+				})
+			}
+		}
+		return true
+	})
+
+	return list
 }
