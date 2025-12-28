@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +42,8 @@ type API struct {
 }
 
 func New(d *db.DB, g *game.Manager, s string, origins []string, l *slog.Logger) http.Handler {
+	fmt.Println(">>> [INIT] Запуск API и инициализация статики...")
+	
 	allowed := make(map[string]bool)
 	for _, o := range origins {
 		allowed[strings.TrimSpace(o)] = true
@@ -55,17 +60,41 @@ func New(d *db.DB, g *game.Manager, s string, origins []string, l *slog.Logger) 
 	go a.cleanupVisitors()
 
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/v1/categories", a.getCategories)
 	mux.HandleFunc("POST /api/v1/auth/register", a.register)
 	mux.HandleFunc("POST /api/v1/auth/login", a.login)
 
 	auth := a.authMiddleware
-	mux.HandleFunc("GET /api/v1/users/me", auth(a.me))
+	mux.HandleFunc("/api/v1/users/me", auth(a.me))
 	mux.HandleFunc("GET /api/v1/users/history", auth(a.history))
 	mux.HandleFunc("GET /api/v1/leaderboard", auth(a.leaderboard))
-	mux.HandleFunc("POST /api/v1/rooms", auth(a.createRoom("lobby")))
-	mux.HandleFunc("POST /api/v1/practice", auth(a.createRoom("solo")))
 
-	mux.HandleFunc("/ws", a.ws)
+	mux.HandleFunc("GET /api/v1/lobbies", auth(a.handleGetLobbies))
+	mux.HandleFunc("POST /api/v1/lobby/create", auth(a.handleCreateManualLobby))
+	mux.HandleFunc("POST /api/v1/practice", auth(a.createRoom("solo")))
+	mux.HandleFunc("/ws/lobby/", a.handleLobbyWS)
+	mux.HandleFunc("/ws", a.handleWS)
+
+	staticDir := "./frontend/static"
+	fs := http.FileServer(http.Dir(staticDir))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			a.error(w, "API endpoint not found", 404)
+			return
+		}
+
+		filePath := filepath.Join(staticDir, r.URL.Path)
+		_, err := os.Stat(filePath)
+		
+		if os.IsNotExist(err) || r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			return
+		}
+
+		fs.ServeHTTP(w, r)
+	})
 
 	return a.corsMiddleware(a.rateLimitMiddleware(mux))
 }
@@ -102,6 +131,12 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 	a.sendToken(w, id, req.Username)
 }
 
+func (a *API) handleCreateManualLobby(w http.ResponseWriter, r *http.Request) {
+	uid := r.Context().Value(uidKey).(string)
+	roomID := a.gm.CreateManualLobby(uid)
+	a.json(w, map[string]string{"room_id": roomID}, 200)
+}
+
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Username, Password string }
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -109,7 +144,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := a.db.GetUser(r.Context(), req.Username)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(req.Password)) != nil {
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)) != nil {
 		a.error(w, "неверные данные", 401)
 		return
 	}
@@ -130,11 +165,18 @@ func (a *API) sendToken(w http.ResponseWriter, id, name string) {
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
-	a.json(w, map[string]any{"id": r.Context().Value(uidKey)}, 200)
+	uid := r.Context().Value(uidKey).(string)
+	user, err := a.db.GetUserByID(r.Context(), uid) 
+	if err != nil {
+		a.error(w, "пользователь не найден", 404)
+		return
+	}
+	a.json(w, user, 200)
 }
 
 func (a *API) history(w http.ResponseWriter, r *http.Request) {
-	d, next, err := a.db.GetHistory(r.Context(), r.Context().Value(uidKey).(string), 20, r.URL.Query().Get("cursor"))
+	uid, _ := r.Context().Value(uidKey).(string)
+	d, next, err := a.db.GetHistory(r.Context(), uid, 20, r.URL.Query().Get("cursor"))
 	if err != nil {
 		a.error(w, "ошибка бд", 500)
 		return
@@ -161,28 +203,16 @@ func (a *API) createRoom(mode string) http.HandlerFunc {
 		if mode == "solo" {
 			s.MaxPlayers = 1
 		}
-		rm := a.gm.CreateRoom(r.Context().Value(uidKey).(string), mode, s)
+		uid, _ := r.Context().Value(uidKey).(string)
+		rm := a.gm.CreateRoom(uid, mode, s)
 		a.json(w, map[string]string{"room_id": rm}, 200)
 	}
-}
-
-func (a *API) ws(w http.ResponseWriter, r *http.Request) {
-	tokenStr := r.URL.Query().Get("token")
-	t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) { return a.secret, nil })
-	if err != nil || !t.Valid {
-		a.error(w, "неавторизован", 401)
-		return
-	}
-	c := t.Claims.(jwt.MapClaims)
-	a.gm.HandleWS(w, r, c["sub"].(string), c["username"].(string))
 }
 
 func (a *API) json(w http.ResponseWriter, d any, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(d); err != nil {
-		a.log.Error("ошибка записи json", "err", err)
-	}
+	_ = json.NewEncoder(w).Encode(d)
 }
 
 func (a *API) error(w http.ResponseWriter, msg string, code int) {
@@ -196,7 +226,8 @@ func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			a.error(w, "нет токена", 401)
 			return
 		}
-		t, err := jwt.Parse(strings.TrimPrefix(h, "Bearer "), func(t *jwt.Token) (interface{}, error) { return a.secret, nil })
+		tokenStr := strings.TrimPrefix(h, "Bearer ")
+		t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) { return a.secret, nil })
 		if err != nil || !t.Valid {
 			a.error(w, "неверный токен", 401)
 			return
@@ -214,29 +245,41 @@ func (a *API) corsMiddleware(next http.Handler) http.Handler {
 		allow := a.origins["*"] || a.origins[origin]
 		if allow {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			if a.origins["*"] && origin == "" {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+func (a *API) getCategories(w http.ResponseWriter, r *http.Request) {
+	cats, err := a.db.GetCategories(r.Context())
+	if err != nil {
+		a.log.Error("Failed to get categories", "err", err)
+		a.error(w, "внутренняя ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	if len(cats) == 0 {
+		cats = []string{"general"}
+	}
+
+	a.json(w, map[string]any{
+		"categories": cats,
+	}, http.StatusOK)
+}
+
 func (a *API) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if ip == "" {
 			ip = r.RemoteAddr
 		}
-		v, ok := a.limit.Load(ip)
-		if !ok {
-			v, _ = a.limit.LoadOrStore(ip, &visitor{limiter: rate.NewLimiter(rate.Limit(10), 20)})
-		}
+		v, _ := a.limit.LoadOrStore(ip, &visitor{limiter: rate.NewLimiter(rate.Limit(10), 20)})
 		vis := v.(*visitor)
 		vis.lastSeen = time.Now()
 		if !vis.limiter.Allow() {
@@ -245,4 +288,49 @@ func (a *API) rateLimitMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *API) handleGetLobbies(w http.ResponseWriter, r *http.Request) {
+	list := a.gm.GetActiveLobbies()
+	a.json(w, list, 200)
+}
+
+func (a *API) handleLobbyWS(w http.ResponseWriter, r *http.Request) {
+	uid, _ := r.Context().Value(uidKey).(string)
+	username, _ := r.Context().Value(userKey).(string)
+	a.gm.HandleWS(w, r, uid, username)
+}
+
+func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
+	uid, _ := r.Context().Value(uidKey).(string)
+	user, _ := r.Context().Value(userKey).(string)
+	
+	if uid == "" {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr != "" {
+			token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+				return a.secret, nil
+			})
+			if err == nil && token.Valid {
+				if claims, ok := token.Claims.(jwt.MapClaims); ok {
+					if s, ok := claims["sub"].(string); ok { uid = s }
+					if u, ok := claims["username"].(string); ok { user = u }
+				}
+			}
+		}
+	}
+
+	if uid != "" && (user == "" || user == "Guest") {
+		dbUser, err := a.db.GetUserByID(r.Context(), uid)
+		if err == nil && dbUser != nil {
+			user = dbUser.Username
+		}
+	}
+
+	if uid == "" {
+		uid = fmt.Sprintf("guest_%d", time.Now().UnixNano())
+		user = "Guest_" + uid[len(uid)-4:]
+	}
+
+	a.gm.HandleWS(w, r, uid, user)
 }

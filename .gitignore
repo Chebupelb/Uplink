@@ -18,3 +18,5 @@ vendor/
 /server
 /dist/
 /tmp/
+
+*.txt

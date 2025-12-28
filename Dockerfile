@@ -9,7 +9,10 @@ FROM alpine:3.23
 WORKDIR /app
 RUN addgroup -S app && adduser -S user -G app
 COPY --from=builder /app/server .
+
 COPY backend/migrations ./migrations
+COPY --from=builder /app/frontend/static ./frontend/static
+
 USER user
 EXPOSE 8080
 CMD ["./server"]
