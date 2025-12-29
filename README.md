@@ -1,7 +1,7 @@
 # Описание
 Uplink — это платформа для соревнований по скоростному набору текста в реальном времени. Проект позволяет пользователям соревноваться друг с другом, отслеживать прогресс и улучшать навыки печати через интерактивные игровые режимы.
 
-![Alt Text](https://github.com/Timur072604/Uplink/blob/main/docs/img/preview.gif)
+![Alt Text](https://github.com/Timur072604/Uplink/blob/main/docs/img/preview_loop_infinite.gif)
 
 ## Функционал
 
