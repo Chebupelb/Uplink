@@ -67,6 +67,16 @@ docker-compose up --build
 * **Веб-приложение доступно по адресу:** [http://localhost:8080](http://localhost:8080)
 * **Интерфейс администрирования БД:** [http://localhost:5050](http://localhost:5050)
 
+## Тестирование
+
+1. Убедитесь, что запущен Docker.
+2. В терминале из папки проекта выполните команды:
+   
+```bash
+go test ./backend/... -v
+go test ./backend/... -cover
+```
+
 ## Структура проекта
 
 ```mermaid
