@@ -9,10 +9,10 @@ import (
 )
 
 type User struct {
-	ID          string    `json:"id"`
-	Username    string  `json:"username"`
-	Rating      int     `json:"rating"`
-	AvgWpm      float64 `json:"avg_wpm"`
+	ID       string  `json:"id"`
+	Username string  `json:"username"`
+	Rating   int     `json:"rating"`
+	AvgWpm   float64 `json:"avg_wpm"`
 }
 
 type LobbyInfo struct {
@@ -24,16 +24,27 @@ type LobbyInfo struct {
 type App struct {
 	doc           js.Value
 	root          js.Value
-	User 		  *User
+	User          *User
 	CurrentRoomID string
 	Socket        js.Value
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			js.Global().Get("document").Get("body").Set("innerHTML",
+				fmt.Sprintf("<div style='color:red;padding:20px;background:black;z-index:9999;position:fixed;'>FATAL ERROR: %v</div>", r))
+		}
+	}()
+
 	app := &App{
 		doc: js.Global().Get("document"),
 	}
 	app.root = app.doc.Call("getElementById", "app")
+
+	if app.root.IsNull() {
+		panic("Element #app not found")
+	}
 
 	js.Global().Set("createLobby", js.FuncOf(func(this js.Value, args []js.Value) any {
 		app.handleCreateLobby()
@@ -54,7 +65,7 @@ func main() {
 	js.Global().Set("logout", js.FuncOf(func(this js.Value, args []js.Value) any {
 		js.Global().Get("localStorage").Call("removeItem", "token")
 		app.User = nil
-		app.navigate("/")
+		renderAuth(app, false)
 		return nil
 	}))
 	js.Global().Set("changeTab", js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -81,18 +92,16 @@ func (a *App) navigate(path string) {
 func (a *App) router() {
 	fullPath := js.Global().Get("location").Get("pathname").String()
 	cleanPath := strings.Split(fullPath, "?")[0]
-	
+
 	token := js.Global().Get("localStorage").Call("getItem", "token")
-	if token.IsNull() {
-		if cleanPath != "/" {
-			a.navigate("/")
-		} else {
-			renderAuth(a, false)
-		}
+
+	if token.IsNull() || token.String() == "" {
+		renderAuth(a, false)
 		return
 	}
 
 	if a.User == nil {
+		a.renderLoading()
 		a.fetchUser()
 		return
 	}
@@ -106,17 +115,24 @@ func (a *App) router() {
 		}
 	}
 
-	if cleanPath == "/menu" || cleanPath == "/" {
-		renderMenu(a, "dashboard")
-		return
-	}
-	
 	renderMenu(a, "dashboard")
+}
+
+func (a *App) renderLoading() {
+	html := `
+	<div class="fixed inset-0 flex flex-col items-center justify-center z-50">
+		<div class="text-[#00f3ff] font-mono text-xl tracking-[0.5em] animate-pulse">INITIALIZING_UPLINK...</div>
+		<div class="mt-4 w-48 h-1 bg-[#00f3ff]/20">
+			<div class="h-full bg-[#00f3ff] animate-[width_1s_ease-in-out_infinite]" style="width: 50%"></div>
+		</div>
+	</div>`
+	a.root.Set("innerHTML", html)
 }
 
 func (a *App) fetchUser() {
 	token := js.Global().Get("localStorage").Call("getItem", "token").String()
 	if token == "" {
+		renderAuth(a, false)
 		return
 	}
 	go func() {
@@ -124,9 +140,18 @@ func (a *App) fetchUser() {
 		req, _ := http.NewRequest("GET", "/api/v1/users/me", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
+
 		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
 			json.NewDecoder(resp.Body).Decode(&a.User)
 			a.router()
+		} else {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			js.Global().Get("localStorage").Call("removeItem", "token")
+			a.User = nil
+			renderAuth(a, false)
 		}
 	}()
 }
@@ -233,7 +258,7 @@ func (a *App) fetchLeaderboard() {
 			if rows == "" {
 				rows = `<div class="opacity-20 text-center mt-20 tracking-[1em] text-xs">NO_NETRUNERS_ONLINE</div>`
 			}
-			el.Set("innerHTML", `<div class="max-w-5xl mx-auto py-4">` + rows + `</div>`)
+			el.Set("innerHTML", `<div class="max-w-5xl mx-auto py-4">`+rows+`</div>`)
 		}
 	}()
 }
@@ -285,7 +310,7 @@ func (a *App) fetchHistory() {
 			if rows == "" {
 				rows = `<div class="opacity-20 text-center mt-20 tracking-[0.5em] text-xs">NO_DATA_LOGS_FOUND</div>`
 			}
-			el.Set("innerHTML", `<div class="max-w-6xl mx-auto py-4">` + rows + `</div>`)
+			el.Set("innerHTML", `<div class="max-w-6xl mx-auto py-4">`+rows+`</div>`)
 		}
 	}()
 }
