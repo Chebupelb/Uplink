@@ -121,7 +121,7 @@ func TestSaveMatchAndGetHistory(t *testing.T) {
 		t.Fatalf("не удалось получить историю матчей: %v", err)
 	}
 	if len(history) == 0 {
-		t.Log("история матчей пустая - это нормально, если пользователь не участвовал в матчах")
+		t.Log("история матчей пустая")
 	}
 }
 
@@ -137,6 +137,6 @@ func TestGetLeaderboard(t *testing.T) {
 		t.Fatalf("не удалось получить таблицу лидеров: %v", err)
 	}
 	if len(leaderboard) == 0 {
-		t.Log("таблица лидеров пустая - это нормально для новой базы")
+		t.Log("таблица лидеров пустая")
 	}
 }
