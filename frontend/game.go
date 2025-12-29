@@ -108,6 +108,26 @@ func (a *App) renderGamePage(payload json.RawMessage) {
 			case "game_end":
 				game.IsFinished = true
 				js.Global().Get("window").Set("onkeydown", nil)
+
+				var resPayload struct {
+					Results []struct {
+						UserID    string  `json:"user_id"`
+						NewRating int     `json:"new_rating"`
+						NewAvgWpm float64 `json:"new_avg_wpm"`
+					} `json:"results"`
+				}
+				json.Unmarshal(msg.Payload, &resPayload)
+
+				if a.User != nil {
+					for _, r := range resPayload.Results {
+						if r.UserID == a.User.ID {
+							a.User.Rating = r.NewRating
+							a.User.AvgWpm = r.NewAvgWpm
+							a.updateMenuStats(a.User.Rating, a.User.AvgWpm)
+						}
+					}
+				}
+
 				a.showResultsModal(msg.Payload)
 			}
 			return nil
@@ -250,7 +270,7 @@ func (a *App) updateOpponentsUI(payload json.RawMessage) {
 		percent := (s.Progress / totalChars) * 100
 		name := s.Username
 		if name == "" {
-			name = "AGENT_" + s.UserID[:4]
+			name = "NETRUNER_" + s.UserID[:4]
 		}
 		html += fmt.Sprintf(`
         <div class="mb-3">
@@ -288,7 +308,7 @@ func (a *App) showResultsModal(payload json.RawMessage) {
 		}
 		name := r.Username
 		if name == "" {
-			name = "AGENT_" + r.UserID[:4]
+			name = "NETRUNER_" + r.UserID[:4]
 		}
 
 		rowsHtml += fmt.Sprintf(`

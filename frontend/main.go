@@ -156,7 +156,7 @@ func (a *App) fetchLobbies() {
 						<div class="text-lg font-bold text-[#00f3ff] group-hover:glow-text transition-all">%s</div>
 					</div>
 					<div class="text-right">
-						<div class="text-[10px] opacity-40 font-mono">AGENTS</div>
+						<div class="text-[10px] opacity-40 font-mono">NETRUNERS</div>
 						<div class="text-xl font-bold">%d <span class="text-xs opacity-30">CONN</span></div>
 					</div>
 				</div>`, l.ID, l.ID, l.Players)
@@ -219,7 +219,7 @@ func (a *App) fetchLeaderboard() {
 					<div class="flex items-center gap-8">
 						<div class="text-3xl font-black font-mono opacity-20 w-16">#%02d</div>
 						<div>
-							<div class="text-[9px] text-[#00f3ff] opacity-40 tracking-[0.3em] mb-1">OPERATOR_ID</div>
+							<div class="text-[9px] text-[#00f3ff] opacity-40 tracking-[0.3em] mb-1">NETRUNER_ID</div>
 							<div class="text-2xl font-bold tracking-tight %s uppercase">%s</div>
 						</div>
 					</div>
@@ -231,7 +231,7 @@ func (a *App) fetchLeaderboard() {
 		}
 		if el := a.doc.Call("getElementById", "menu-content"); !el.IsNull() {
 			if rows == "" {
-				rows = `<div class="opacity-20 text-center mt-20 tracking-[1em] text-xs">NO_OPERATORS_ONLINE</div>`
+				rows = `<div class="opacity-20 text-center mt-20 tracking-[1em] text-xs">NO_NETRUNERS_ONLINE</div>`
 			}
 			el.Set("innerHTML", `<div class="max-w-5xl mx-auto py-4">` + rows + `</div>`)
 		}

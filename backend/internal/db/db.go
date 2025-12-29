@@ -14,7 +14,7 @@ type DB struct {
 }
 
 type User struct {
-	ID           string  `json:"id"`
+	ID           string  `json:"id"` 
 	Username     string  `json:"username"`
 	PasswordHash string  `json:"-"`
 	Rating       int     `json:"rating"`
@@ -28,7 +28,7 @@ type Text struct {
 }
 
 type MatchResult struct {
-	UserID    string
+	UserID   string
 	WPM, Rank int
 	Accuracy  float64
 }
@@ -46,9 +46,14 @@ func New(url string, maxConns int32) (*DB, error) {
 func (d *DB) Close() { d.pool.Close() }
 
 func (d *DB) CreateUser(ctx context.Context, name, hash string) (string, error) {
-	var id string
-	err := d.pool.QueryRow(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id", name, hash).Scan(&id)
-	return id, err
+    var id string
+    query := `
+        INSERT INTO users (username, password_hash, rating, avg_wpm) 
+        VALUES ($1, $2, 0, 0) 
+        RETURNING id`
+    
+    err := d.pool.QueryRow(ctx, query, name, hash).Scan(&id)
+    return id, err
 }
 
 func (d *DB) GetLeaderboard(ctx context.Context, limit int) ([]map[string]any, error) {
@@ -70,6 +75,27 @@ func (d *DB) GetUser(ctx context.Context, name string) (*User, error) {
 	}
 	return &u, nil
 }
+
+
+func (d *DB) UpdateRating(ctx context.Context, uid string, change int) error {
+	_, err := d.pool.Exec(ctx, "UPDATE users SET rating = rating + $1 WHERE id = $2", change, uid)
+	return err
+}
+
+func (db *DB) RefreshUserStats(ctx context.Context, userID string) error {
+	query := `
+		UPDATE users 
+		SET avg_wpm = COALESCE((
+			SELECT AVG(wpm) 
+			FROM match_results 
+			WHERE user_id = $1
+		), 0)
+		WHERE id = $1`
+
+	_, err := db.pool.Exec(ctx, query, userID)
+	return err
+}
+
 func (d *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	rows, err := d.pool.Query(ctx, "SELECT id, username, password_hash, rating, avg_wpm FROM users WHERE id=$1", id)
 	if err != nil {
@@ -81,23 +107,6 @@ func (d *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	}
 	return &u, nil
 }
-
-func (d *DB) UpdateRating(ctx context.Context, uid string, change int) error {
-	_, err := d.pool.Exec(ctx, "UPDATE users SET rating = rating + $1 WHERE id = $2", change, uid)
-	return err
-}
-
-func (d *DB) RefreshUserStats(ctx context.Context, userID string) error {
-	query := `
-        UPDATE users 
-        SET avg_wpm = (SELECT AVG(wpm) FROM match_results WHERE user_id = $1),
-			rating = rating + $2 -- (условно)
-		WHERE id = $1`
-
-	_, err := d.pool.Exec(ctx, query, userID)
-	return err
-}
-
 func (d *DB) GetText(ctx context.Context, lang, cat string, id int) (*Text, error) {
 	q, args := "SELECT id, content, length FROM texts WHERE id=$1", []any{id}
 	if id == 0 {
@@ -160,11 +169,11 @@ func (d *DB) GetHistory(ctx context.Context, uid string, limit int, cursor strin
 		return nil, "", err
 	}
 	type Row struct {
-		ID       string    `db:"id"`
-		Preview  string    `db:"preview"`
-		WPM      int       `db:"wpm"`
-		Rank     int       `db:"rank"`
-		Accuracy float64   `db:"accuracy"`
+		ID      string    `db:"id"`
+		Preview string    `db:"preview"`
+		WPM     int       `db:"wpm"`
+		Rank    int       `db:"rank"`
+		Accuracy float64  `db:"accuracy"`
 		EndedAt  time.Time `db:"ended_at"`
 	}
 	data, err := pgx.CollectRows(rows, pgx.RowToStructByName[Row])

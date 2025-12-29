@@ -274,8 +274,8 @@ func (m *Manager) lobbyReadLoop(c *Client, queueKey string) {
 					"type": "chat_message",
 					"payload": map[string]any{
 						"sender_name": c.Username,
-						"text":         p.Text,
-						"time":         time.Now(),
+						"text":        p.Text,
+						"time":        time.Now(),
 					},
 				}
 				m.qMu.Lock()
@@ -587,8 +587,8 @@ func (c *Client) readLoop() {
 				newMsg := map[string]any{
 					"sender_id":   c.ID,
 					"sender_name": c.Username,
-					"text":         p.Text,
-					"time":         time.Now(),
+					"text":        p.Text,
+					"time":        time.Now(),
 				}
 
 				c.room.mu.Lock()
@@ -739,30 +739,25 @@ func (r *Room) finish() {
 
 	for i, entry := range tempRes {
 		change := 0
-
+		
 		if len(tempRes) >= 2 {
 			score := 0.0
-			if i == 0 { score = 1.0 }
+			if i == 0 {
+				score = 1.0
+			}
 			
 			otherIdx := 0
-			if i == 0 { otherIdx = 1 }
+			if i == 0 {
+				otherIdx = 1
+			}
 			otherRating := tempRes[otherIdx].Rating
 			
 			change = calculateElo(entry.Rating, otherRating, score)
 		} else {
 			change = 5
 		}
-		
-		_ = r.db.UpdateRating(context.Background(), entry.ID, change)
 
-		finalStates[i] = map[string]any{
-			"user_id":       entry.ID,
-			"username":      entry.Name,
-			"wpm":           entry.WPM,
-			"accuracy":      entry.Accuracy,
-			"finished":      true,
-			"rating_change": change,
-		}
+		_ = r.db.UpdateRating(context.Background(), entry.ID, change)
 
 		dbResults[i] = db.MatchResult{
 			UserID:   entry.ID,
@@ -774,12 +769,32 @@ func (r *Room) finish() {
 
 	_ = r.db.SaveMatch(context.Background(), r.Text.ID, dbResults)
 
-	for _, entry := range tempRes {
-		go func(uid string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = r.db.RefreshUserStats(ctx, uid)
-		}(entry.ID)
+	for i, entry := range tempRes {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = r.db.RefreshUserStats(ctx, entry.ID)
+		cancel()
+
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+		updatedUser, err := r.db.GetUserByID(ctx2, entry.ID)
+		cancel2()
+
+		newRating := entry.Rating 
+		newAvgWpm := 0.0          
+
+		if err == nil {
+			newRating = updatedUser.Rating
+			newAvgWpm = updatedUser.AvgWpm
+		}
+
+		finalStates[i] = map[string]any{
+			"user_id":       entry.ID,
+			"username":      entry.Name,
+			"wpm":           entry.WPM,
+			"accuracy":      entry.Accuracy,
+			"finished":      true,
+			"new_rating":    newRating, 
+			"new_avg_wpm":   newAvgWpm, 
+		}
 	}
 
 	r.broadcast <- map[string]any{"type": "game_end", "payload": map[string]any{"results": finalStates}}

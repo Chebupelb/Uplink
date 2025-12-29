@@ -5,6 +5,7 @@ CREATE TABLE users (
                        username VARCHAR(32) UNIQUE NOT NULL,
                        password_hash VARCHAR(255) NOT NULL,
                        rating INT DEFAULT 1000
+                       avg_wpm NUMERIC DEFAULT 0
 );
 
 CREATE TABLE texts (

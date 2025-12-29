@@ -12,10 +12,6 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
       POSTGRES_DB: uplink
-    # -------------------------- для теста добавил
-    ports:
-      - "5432:5432"
-    # --------------------------------------------
     volumes:
       - ./backend/migrations:/docker-entrypoint-initdb.d
   pgadmin:

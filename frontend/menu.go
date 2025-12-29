@@ -25,7 +25,7 @@ func renderMenu(a *App, tab string) {
             storage.Call("removeItem", "token")
         }
 
-        fmt.Println("UPLINK: Connection terminated by agent.")
+        fmt.Println("UPLINK: Connection terminated by netruner.")
 
         a.navigate("/auth")
         return nil
@@ -45,7 +45,7 @@ func renderMenu(a *App, tab string) {
         cont = `
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 relative z-10">
                 <div class="hud-border p-6 bg-black/40 backdrop-blur-md border-[#00f3ff]/20">
-                    <div class="text-[10px] opacity-40 mb-1 font-mono tracking-widest text-[#00f3ff]">RANK</div>
+                    <div class="text-[10px] opacity-40 mb-1 font-mono tracking-widest text-[#00f3ff]">RATING_SCORE</div>
                     <div id="display-rank" class="text-5xl font-black tracking-tighter text-white">#` + displayRating + `</div>
                 </div>
 
@@ -96,7 +96,7 @@ func renderMenu(a *App, tab string) {
         go a.fetchHistory()
     }
 
-    username := "UNKNOWN_AGENT"
+    username := "UNKNOWN_NETRUNER"
     if a.User != nil { username = a.User.Username }
 
     html := `
@@ -119,7 +119,7 @@ func renderMenu(a *App, tab string) {
             </nav>
 
             <div class="mt-auto pt-8 border-t border-[#00f3ff]/10">
-                <div class="text-[8px] opacity-20 mb-4 tracking-widest uppercase">Operator: ` + username + `</div>
+                <div class="text-[8px] opacity-20 mb-4 tracking-widest uppercase">NetRuner: ` + username + `</div>
                 <button onclick="logout()" class="w-full border border-red-500/30 text-red-500/50 p-3 text-[9px] tracking-[0.5em] hover:bg-red-500/10 transition-all">
                     DISCONNECT
                 </button>

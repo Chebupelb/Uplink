@@ -57,7 +57,7 @@ func (a *App) renderLobbyPage(roomID string) {
                     <h3 class="text-[10px] mb-4 tracking-[0.3em] border-b border-[#00f3ff]/20 pb-2">SESSION_CONFIG</h3>
                     <div class="flex flex-col gap-4">
                         <div class="flex flex-col gap-1">
-                            <label class="text-[9px] opacity-60">MAX_AGENTS</label>
+                            <label class="text-[9px] opacity-60">MAX_NETRUNERS</label>
                             <select id="max-players-select" class="bg-black border border-[#00f3ff]/30 text-[#00f3ff] p-1 text-xs focus:outline-none focus:border-[#00f3ff]">
                                 <option value="1">1 (SOLO)</option>
                                 <option value="2">2 (DUEL)</option>
@@ -83,7 +83,7 @@ func (a *App) renderLobbyPage(roomID string) {
                 </div>
 
                 <div class="hud-border bg-black/60 p-4 flex-1 overflow-y-auto">
-                    <h3 class="text-[10px] mb-4 tracking-[0.3em] border-b border-[#00f3ff]/20 pb-2">CONNECTED_AGENTS</h3>
+                    <h3 class="text-[10px] mb-4 tracking-[0.3em] border-b border-[#00f3ff]/20 pb-2">CONNECTED_NETRUNERS</h3>
                     <div id="player-list" class="space-y-3 font-sans normal-case"></div>
                 </div>
                 
