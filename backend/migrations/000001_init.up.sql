@@ -4,7 +4,7 @@ CREATE TABLE users (
                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                        username VARCHAR(32) UNIQUE NOT NULL,
                        password_hash VARCHAR(255) NOT NULL,
-                       rating INT DEFAULT 1000
+                       rating INT DEFAULT 1000,
                        avg_wpm NUMERIC DEFAULT 0
 );
 
